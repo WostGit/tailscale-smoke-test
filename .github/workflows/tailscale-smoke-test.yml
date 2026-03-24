@@ -10,31 +10,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 🛡️ Join Tailnet
+      - name: 🛡️ Join Tailnet (Symmetric NAT Fix)
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
-          # REMOVED ALL CUSTOM ARGS TO AVOID FLAG ERRORS
+          args: --accept-routes=false --accept-dns=false
         env:
-          # We still keep the port for the background daemon
+          # TS_EXTRA_ARGS is passed to the daemon (tailscaled) in v4
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🏎️ P2P Discovery
+      - name: 🏎️ NAT Hole-Punch & Discovery
         run: |
-          # Wait up to 2 minutes for both to be online
-          for i in {1..24}; do
-            MY_IP=$(tailscale ip -4)
+          MY_IP=$(tailscale ip -4)
+          
+          echo "Waiting for peer..."
+          for i in {1..20}; do
             PEER_IP=$(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] != \"$MY_IP\") | .TailscaleIPs[0]" | head -n 1)
             
             if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then
-              echo "✅ Peer Found: $PEER_IP"
-              tailscale ping --c 5 $PEER_IP
-              tailscale status
+              echo "✅ Peer Found: $PEER_IP. Starting UDP Blast..."
+              
+              # Blast UDP packets to force the Symmetric NAT to create a mapping
+              for j in {1..30}; do
+                nc -u -z -w 1 $PEER_IP 41641
+                sleep 0.1
+              done
+
+              echo "🛰️ Finalizing Direct Path..."
+              tailscale ping --c 5 --tsmp $PEER_IP
+              
+              echo "--- Connection Type ---"
+              # If this still says relay, the cloud firewall is strictly blocking UDP
+              tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] == \"$PEER_IP\") | .CurAddr"
               exit 0
             fi
-            echo "Attempt $i: Waiting for peer..."
             sleep 5
           done
           exit 1
