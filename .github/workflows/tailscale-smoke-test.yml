@@ -1,8 +1,8 @@
-name: "Tailscale Throughput Benchmark"
+name: "Tailscale Zero-Install Benchmark"
 on: workflow_dispatch
 
 jobs:
-  iperf-benchmark:
+  p2p-benchmark:
     runs-on: macos-15
     strategy:
       matrix:
@@ -20,9 +20,8 @@ jobs:
         env:
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🏎️ P2P Discovery & iperf3
+      - name: 🏎️ NC Saturation Test
         run: |
-          brew install iperf3
           MY_IP=$(tailscale ip -4)
           
           echo "Scanning for peer..."
@@ -33,12 +32,14 @@ jobs:
           done
 
           if [ "${{ matrix.rank }}" == "0" ]; then
-            echo "🚀 Rank 0: Listening for Benchmark..."
-            iperf3 -s -1
+            echo "🚀 Rank 0: Listening on port 9999..."
+            # Listen on port 9999 and dump to null. 
+            # We use 'timeout' to stop the job once the test is over.
+            timeout 25s nc -l 9999 > /dev/null || true
           else
-            echo "🏎️ Rank 1: Stress Testing to $PEER_IP..."
-            sleep 15 # Wait for Server to be ready
-            # -P 8 (8 parallel streams) to truly saturate the link
-            # -J (output JSON for your paper's data)
-            iperf3 -c $PEER_IP -t 15 -P 8
+            echo "🏎️ Rank 1: Blasting 500MB of data to $PEER_IP..."
+            sleep 10
+            # Generate 500MB of zeros and send via netcat
+            # We use 'time' to measure how long it takes to calculate speed
+            time (dd if=/dev/zero bs=1m count=500 | nc -v -n $PEER_IP 9999)
           fi
