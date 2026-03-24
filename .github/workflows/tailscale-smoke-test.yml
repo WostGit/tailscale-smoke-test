@@ -1,8 +1,8 @@
-name: "Tailscale Direct P2P Test"
+name: "Tailscale Bandwidth Test"
 on: workflow_dispatch
 
 jobs:
-  p2p-test:
+  p2p-iperf:
     runs-on: macos-15
     strategy:
       matrix:
@@ -20,43 +20,27 @@ jobs:
         env:
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🏎️ NAT Hole-Punch & Discovery
+      - name: 🏎️ NAT Hole-Punch & iperf3 Setup
         run: |
+          brew install iperf3
           MY_IP=$(tailscale ip -4)
-          echo "My IP: $MY_IP"
           
-          echo "Waiting for peer to join the tailnet..."
-          PEER_IP=""
-          
-          # Wait up to 2 minutes (24 attempts * 5s)
-          for i in {1..24}; do
-            # Safe JQ: Check if .Peer exists before iterating
+          # Discovery Loop
+          for i in {1..20}; do
             PEER_IP=$(tailscale status --json | jq -r 'if .Peer != null then .Peer[] | select(.TailscaleIPs[0] != "'$MY_IP'") | .TailscaleIPs[0] else empty end' | head -n 1)
-            
-            if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then
-              echo "✅ Peer Found: $PEER_IP"
-              break
-            fi
-            
-            echo "Attempt $i: Peer not visible yet. Retrying in 5s..."
+            if [ ! -z "$PEER_IP" ]; then break; fi
             sleep 5
           done
 
-          if [ -z "$PEER_IP" ]; then
-            echo "❌ Timeout: Peer never joined."
-            tailscale status
-            exit 1
+          echo "✅ Peer Found: $PEER_IP"
+
+          if [ "${{ matrix.rank }}" == "0" ]; then
+            echo "🚀 Rank 0: Starting iperf3 Server..."
+            # -s: server mode, -1: handle one test and exit
+            iperf3 -s -1
+          else
+            echo "🏎️ Rank 1: Starting 10s Stress Test to $PEER_IP..."
+            sleep 15 # Give Rank 0 time to start brew install + server
+            # -c: client, -t: duration, -P: parallel streams for max throughput
+            iperf3 -c $PEER_IP -t 10 -P 4
           fi
-
-          echo "🛰️ Starting UDP Hole-Punch to $PEER_IP..."
-          # Blast UDP packets to help the firewall map the port 41641
-          for j in {1..20}; do
-            nc -u -z -w 1 $PEER_IP 41641
-            sleep 0.1
-          done
-
-          echo "--- Connection Type (Look for 'direct') ---"
-          tailscale ping --c 5 --tsmp $PEER_IP
-          
-          # Final check to see if we moved off DERP relay
-          tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] == \"$PEER_IP\") | .CurAddr"
