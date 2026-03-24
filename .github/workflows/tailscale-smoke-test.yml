@@ -1,4 +1,4 @@
-name: "Tailscale Research Benchmark (Stable)"
+name: "Tailscale Research Benchmark (Final)"
 on: workflow_dispatch
 
 jobs:
@@ -20,7 +20,7 @@ jobs:
         env:
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🏎️ High-Stability Saturation Test
+      - name: 🏎️ OS-Native Saturation Test
         run: |
           MY_IP=$(tailscale ip -4)
           
@@ -32,20 +32,24 @@ jobs:
           done
 
           if [ "${{ matrix.rank }}" == "0" ]; then
-            echo "🚀 Rank 0: Hosting Stable Socket..."
-            # Use 'ncat' style persistence: keep the listener open for 60s
-            # We redirect to /dev/null but keep the process alive
-            timeout 60s /usr/bin/nc -l 9999 > /dev/null &
-            sleep 65
+            echo "🚀 Rank 0: Hosting Socket via Background Loop..."
+            # Keep listening until the 'stop_test' file appears
+            while [ ! -f /tmp/stop_test ]; do
+              nc -l 9999 > /dev/null
+            done &
+            LOOP_PID=$!
+            sleep 45
+            touch /tmp/stop_test
+            kill $LOOP_PID || true
           else
-            echo "🏎️ Rank 1: Initializing P2P Link to $PEER_IP..."
-            sleep 20 # Ensure Rank 0 is fully listening
+            echo "🏎️ Rank 1: Syncing with $PEER_IP..."
+            sleep 20
             
-            # 2. Check path status (The 4ms check)
+            # 2. Performance Metric 1: Latency
             tailscale ping --c 3 --tsmp $PEER_IP
             
-            # 3. Data Blast
+            # 3. Performance Metric 2: Throughput
             echo "🔥 Executing 500MB saturation..."
-            # We use -v to see the connection status
-            dd if=/dev/zero bs=1m count=500 | nc -v $PEER_IP 9999
+            # On macOS, dd prints stats to stderr when it's done
+            dd if=/dev/zero bs=1m count=500 | nc -v -n $PEER_IP 9999
           fi
