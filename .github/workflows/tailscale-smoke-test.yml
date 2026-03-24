@@ -1,4 +1,4 @@
-name: "Tailscale Research Benchmark (Final)"
+name: "Tailscale Python Benchmark"
 on: workflow_dispatch
 
 jobs:
@@ -20,36 +20,71 @@ jobs:
         env:
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🏎️ OS-Native Saturation Test
+      - name: 🏎️ Python P2P Stress Test
         run: |
           MY_IP=$(tailscale ip -4)
           
-          # 1. Discovery
-          for i in {1..20}; do
+          # 1. Discovery Loop
+          echo "Scanning for peer..."
+          for i in {1..24}; do
             PEER_IP=$(tailscale status --json | jq -r 'if .Peer != null then .Peer[] | select(.TailscaleIPs[0] != "'$MY_IP'") | .TailscaleIPs[0] else empty end' | head -n 1)
             if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then break; fi
+            echo "Waiting for peer ($i/24)..."
             sleep 5
           done
 
-          if [ "${{ matrix.rank }}" == "0" ]; then
-            echo "🚀 Rank 0: Hosting Socket via Background Loop..."
-            # Keep listening until the 'stop_test' file appears
-            while [ ! -f /tmp/stop_test ]; do
-              nc -l 9999 > /dev/null
-            done &
-            LOOP_PID=$!
-            sleep 45
-            touch /tmp/stop_test
-            kill $LOOP_PID || true
-          else
-            echo "🏎️ Rank 1: Syncing with $PEER_IP..."
-            sleep 20
-            
-            # 2. Performance Metric 1: Latency
-            tailscale ping --c 3 --tsmp $PEER_IP
-            
-            # 3. Performance Metric 2: Throughput
-            echo "🔥 Executing 500MB saturation..."
-            # On macOS, dd prints stats to stderr when it's done
-            dd if=/dev/zero bs=1m count=500 | nc -v -n $PEER_IP 9999
-          fi
+          # 2. Generate the Python Benchmark Script
+          cat <<'EOF' > bench.py
+          import socket, time, os, sys
+
+          PORT = 9999
+          SIZE_MB = 500
+          DATA = b"\0" * (1024 * 1024) # 1MB buffer
+
+          def run_server():
+              print(f"🚀 Rank 0: Sink started on {PORT}...")
+              with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                  s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                  s.bind(('0.0.0.0', PORT))
+                  s.listen(1)
+                  conn, addr = s.accept()
+                  with conn:
+                      print(f"✅ Connected by {addr}")
+                      start = time.time()
+                      total = 0
+                      while total < (SIZE_MB * 1024 * 1024):
+                          chunk = conn.recv(1024 * 1024)
+                          if not chunk: break
+                          total += len(chunk)
+                      duration = time.time() - start
+                      mbps = (total * 8) / (duration * 1_000_000)
+                      print(f"📊 Result: {total/(1024*1024):.1f}MB in {duration:.2f}s ({mbps:.2f} Mbps)")
+
+          def run_client(peer_ip):
+              print(f"🏎️ Rank 1: Blasting {SIZE_MB}MB to {peer_ip}...")
+              for i in range(15):
+                  try:
+                      with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                          s.connect((peer_ip, PORT))
+                          start = time.time()
+                          for _ in range(SIZE_MB):
+                              s.sendall(DATA)
+                          print(f"🔥 Blast complete in {time.time() - start:.2f}s")
+                          return
+                  except Exception as e:
+                      print(f"Waiting for server... ({i+1}/15)")
+                      time.sleep(2)
+
+          if __name__ == "__main__":
+              rank = os.environ.get("RANK")
+              peer = os.environ.get("PEER_IP")
+              if rank == "0":
+                  run_server()
+              else:
+                  run_client(peer)
+          EOF
+
+          # 3. Execute
+          export RANK=${{ matrix.rank }}
+          export PEER_IP=$PEER_IP
+          python3 bench.py
