@@ -1,8 +1,8 @@
-name: "Tailscale Bandwidth Test"
+name: "Tailscale Throughput Benchmark"
 on: workflow_dispatch
 
 jobs:
-  p2p-iperf:
+  iperf-benchmark:
     runs-on: macos-15
     strategy:
       matrix:
@@ -20,27 +20,25 @@ jobs:
         env:
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🏎️ NAT Hole-Punch & iperf3 Setup
+      - name: 🏎️ P2P Discovery & iperf3
         run: |
           brew install iperf3
           MY_IP=$(tailscale ip -4)
           
-          # Discovery Loop
+          echo "Scanning for peer..."
           for i in {1..20}; do
             PEER_IP=$(tailscale status --json | jq -r 'if .Peer != null then .Peer[] | select(.TailscaleIPs[0] != "'$MY_IP'") | .TailscaleIPs[0] else empty end' | head -n 1)
             if [ ! -z "$PEER_IP" ]; then break; fi
             sleep 5
           done
 
-          echo "✅ Peer Found: $PEER_IP"
-
           if [ "${{ matrix.rank }}" == "0" ]; then
-            echo "🚀 Rank 0: Starting iperf3 Server..."
-            # -s: server mode, -1: handle one test and exit
+            echo "🚀 Rank 0: Listening for Benchmark..."
             iperf3 -s -1
           else
-            echo "🏎️ Rank 1: Starting 10s Stress Test to $PEER_IP..."
-            sleep 15 # Give Rank 0 time to start brew install + server
-            # -c: client, -t: duration, -P: parallel streams for max throughput
-            iperf3 -c $PEER_IP -t 10 -P 4
+            echo "🏎️ Rank 1: Stress Testing to $PEER_IP..."
+            sleep 15 # Wait for Server to be ready
+            # -P 8 (8 parallel streams) to truly saturate the link
+            # -J (output JSON for your paper's data)
+            iperf3 -c $PEER_IP -t 15 -P 8
           fi
