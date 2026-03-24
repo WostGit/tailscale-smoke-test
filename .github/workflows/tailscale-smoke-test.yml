@@ -1,4 +1,4 @@
-name: "Tailscale Research Benchmark (Robust)"
+name: "Tailscale Research Benchmark (Stable)"
 on: workflow_dispatch
 
 jobs:
@@ -20,45 +20,32 @@ jobs:
         env:
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🏎️ Robust P2P Saturation Test
+      - name: 🏎️ High-Stability Saturation Test
         run: |
           MY_IP=$(tailscale ip -4)
           
-          # 1. Discovery with Null-Safety
-          echo "Scanning for peer..."
-          for i in {1..30}; do
+          # 1. Discovery
+          for i in {1..20}; do
             PEER_IP=$(tailscale status --json | jq -r 'if .Peer != null then .Peer[] | select(.TailscaleIPs[0] != "'$MY_IP'") | .TailscaleIPs[0] else empty end' | head -n 1)
             if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then break; fi
-            echo "Waiting for peer ($i/30)..."
             sleep 5
           done
 
-          # 2. Edge Case: Rank-Based Logic
           if [ "${{ matrix.rank }}" == "0" ]; then
-            echo "🚀 Rank 0: Starting Persistent Listener..."
-            # Keep-alive loop to handle 'Broken Pipes'
-            (
-              while true; do 
-                nc -l 9999 > /dev/null
-              done
-            ) &
-            LPID=$!
-            # Ensure cleanup on exit
-            trap "kill $LPID" EXIT
-            sleep 60
+            echo "🚀 Rank 0: Hosting Stable Socket..."
+            # Use 'ncat' style persistence: keep the listener open for 60s
+            # We redirect to /dev/null but keep the process alive
+            timeout 60s /usr/bin/nc -l 9999 > /dev/null &
+            sleep 65
           else
-            echo "🏎️ Rank 1: Warming up connection to $PEER_IP..."
-            sleep 15
+            echo "🏎️ Rank 1: Initializing P2P Link to $PEER_IP..."
+            sleep 20 # Ensure Rank 0 is fully listening
             
-            # 3. Edge Case: Handshake before Saturation
-            # Try to connect 5 times to "warm" the NAT/TCP state
-            for k in {1..5}; do
-              nc -z -v -w 2 $PEER_IP 9999 && break
-              echo "Warmup $k failed, retrying..."
-              sleep 2
-            done
-
-            # 4. The Main Event: 500MB Data Blast
-            echo "🔥 Sourcing data blast..."
-            dd if=/dev/zero bs=1m count=500 | nc -v -n $PEER_IP 9999
+            # 2. Check path status (The 4ms check)
+            tailscale ping --c 3 --tsmp $PEER_IP
+            
+            # 3. Data Blast
+            echo "🔥 Executing 500MB saturation..."
+            # We use -v to see the connection status
+            dd if=/dev/zero bs=1m count=500 | nc -v $PEER_IP 9999
           fi
