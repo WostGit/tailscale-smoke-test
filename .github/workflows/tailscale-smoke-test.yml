@@ -10,39 +10,42 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 🛡️ Join Tailnet (Direct Mode)
+      - name: 🛡️ Join Tailnet
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
-          # Logic flags go in 'args'
-          args: --snat-subnet-routes=false --accept-routes=false
+          # Only use flags that appeared in your 'tailscale up --help' log
+          args: --accept-routes=false --accept-dns=false
         env:
-          # DAEMON flags go here in 2026 v4 Action
+          # This passes directly to the background daemon (tailscaled)
           TS_EXTRA_ARGS: "--port=41641"
-
-      - name: 🩺 Network Diagnostic
-        run: |
-          echo "--- NAT & UDP Check ---"
-          tailscale netcheck
-          echo "--- Tailscale Status ---"
-          tailscale status
 
       - name: 🏎️ P2P Discovery & Hole-Punch
         run: |
           MY_IP=$(tailscale ip -4)
-          PEER_IP=$(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] != \"$MY_IP\") | .TailscaleIPs[0]" | head -n 1)
+          echo "My IP: $MY_IP"
           
-          if [ -z "$PEER_IP" ] || [ "$PEER_IP" == "null" ]; then
-            echo "Waiting for peer..."
-            sleep 15
+          # Wait for the other runner to appear
+          echo "Scanning for peer..."
+          for i in {1..20}; do
             PEER_IP=$(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] != \"$MY_IP\") | .TailscaleIPs[0]" | head -n 1)
-          fi
-
-          echo "Attempting P2P Hole-Punch to $PEER_IP..."
-          # The --tsmp flag uses Tailscale's internal messaging to force a path
-          tailscale ping --c 10 --tsmp $PEER_IP
+            
+            if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then
+              echo "✅ Found Peer: $PEER_IP"
+              echo "🛰️ Forcing P2P Hole-Punch..."
+              # Using the standard ping first, then tailscale ping
+              ping -c 3 $PEER_IP
+              tailscale ping --c 5 $PEER_IP
+              
+              echo "--- Connection Path ---"
+              tailscale status
+              exit 0
+            fi
+            sleep 5
+          done
           
-          # Final path check
-          tailscale status | grep $PEER_IP
+          echo "❌ Peer discovery timed out."
+          tailscale status
+          exit 1
