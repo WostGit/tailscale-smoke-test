@@ -1,4 +1,4 @@
-name: "Tailscale High-Speed Benchmark"
+name: "Tailscale High-Speed Benchmark (Multiprocessing)"
 on: workflow_dispatch
 
 jobs:
@@ -20,57 +20,58 @@ jobs:
         env:
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🚀 Parallel P2P Stress Test
+      - name: 🚀 Multiprocessing P2P Stress Test
         run: |
           MY_IP=$(tailscale ip -4)
           PEER_IP=$(tailscale status --json | jq -r --arg me "$MY_IP" '.Peer | values[]? | select(.TailscaleIPs[0] != $me) | .TailscaleIPs[0]' | head -n 1)
 
           cat <<'EOF' > bench.py
-          import socket, time, os, threading
+          import socket, time, os, multiprocessing
 
-          PORT = 9999
+          PORT_BASE = 9990
           SIZE_MB = 200 
-          STREAMS = 4  # Parallel connections
+          STREAMS = 8  # Increased parallelism
+          CHUNK_SIZE = 4 * 1024 * 1024 # 4MB Buffer for efficiency
 
-          def handle_server_stream(conn):
-              with conn:
-                  while conn.recv(1024*1024): pass
-
-          def run_server():
-              print(f"🚀 Rank 0: Starting {STREAMS} Parallel Sinks...")
-              s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-              s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-              s.bind(('0.0.0.0', PORT))
-              s.listen(STREAMS)
-              
-              threads = []
-              start = time.time()
-              for _ in range(STREAMS):
+          def run_sink(port):
+              with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                  s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                  s.bind(('0.0.0.0', port))
+                  s.listen(1)
                   conn, addr = s.accept()
-                  t = threading.Thread(target=handle_server_stream, args=(conn,))
-                  t.start()
-                  threads.append(t)
-              
-              for t in threads: t.join()
-              duration = time.time() - start
-              total_bits = SIZE_MB * STREAMS * 1024 * 1024 * 8
-              print(f"📊 Result: {SIZE_MB * STREAMS}MB in {duration:.2f}s ({total_bits/(duration*1e6):.2f} Mbps)")
+                  with conn:
+                      while conn.recv(CHUNK_SIZE): pass
 
-          def run_client(ip):
-              print(f"🏎️ Rank 1: Launching {STREAMS} Parallel Blasts...")
-              time.sleep(5)
-              def blast():
-                  with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                      s.connect((ip, PORT))
-                      for _ in range(SIZE_MB): s.sendall(b'\0' * (1024*1024))
-              
-              threads = [threading.Thread(target=blast) for _ in range(STREAMS)]
-              for t in threads: t.start()
-              for t in threads: t.join()
+          def run_blast(ip, port):
+              data = b'\0' * CHUNK_SIZE
+              for _ in range(10): # Retry loop
+                  try:
+                      with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                          s.connect((ip, port))
+                          for _ in range(SIZE_MB // (CHUNK_SIZE // (1024*1024))): 
+                              s.sendall(data)
+                          return
+                  except: time.sleep(1)
 
           if __name__ == "__main__":
-              if os.environ['RANK'] == '0': run_server()
-              else: run_client(os.environ['PEER_IP'])
+              rank = os.environ.get("RANK")
+              peer = os.environ.get("PEER_IP")
+              processes = []
+              
+              start = time.time()
+              for i in range(STREAMS):
+                  target = run_sink if rank == "0" else run_blast
+                  args = (PORT_BASE + i,) if rank == "0" else (peer, PORT_BASE + i)
+                  p = multiprocessing.Process(target=target, args=args)
+                  p.start()
+                  processes.append(p)
+
+              for p in processes: p.join()
+              
+              if rank == "0":
+                  duration = time.time() - start
+                  total_gbits = (SIZE_MB * STREAMS * 8) / 1024
+                  print(f"📊 Result: {SIZE_MB * STREAMS}MB in {duration:.2f}s ({(SIZE_MB * STREAMS * 8)/duration:.2f} Mbps)")
           EOF
 
           export RANK=${{ matrix.rank }}
