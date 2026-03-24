@@ -24,22 +24,22 @@ jobs:
         run: |
           MY_IP=$(tailscale ip -4)
           
-          # 1. Discovery Loop
+          # 1. Discovery Loop (Increased to 30 attempts for slow VM boots)
           echo "Scanning for peer..."
-          for i in {1..24}; do
+          for i in {1..30}; do
             PEER_IP=$(tailscale status --json | jq -r 'if .Peer != null then .Peer[] | select(.TailscaleIPs[0] != "'$MY_IP'") | .TailscaleIPs[0] else empty end' | head -n 1)
             if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then break; fi
-            echo "Waiting for peer ($i/24)..."
+            echo "Waiting for peer ($i/30)..."
             sleep 5
           done
 
-          # 2. Generate the Python Benchmark Script
+          # 2. Write the Python Benchmark Script
           cat <<'EOF' > bench.py
-          import socket, time, os, sys
+          import socket, time, os
 
           PORT = 9999
           SIZE_MB = 500
-          DATA = b"\0" * (1024 * 1024) # 1MB buffer
+          BUFFER_SIZE = 1024 * 1024 # 1MB
 
           def run_server():
               print(f"🚀 Rank 0: Sink started on {PORT}...")
@@ -50,30 +50,33 @@ jobs:
                   conn, addr = s.accept()
                   with conn:
                       print(f"✅ Connected by {addr}")
-                      start = time.time()
-                      total = 0
-                      while total < (SIZE_MB * 1024 * 1024):
-                          chunk = conn.recv(1024 * 1024)
-                          if not chunk: break
-                          total += len(chunk)
-                      duration = time.time() - start
-                      mbps = (total * 8) / (duration * 1_000_000)
-                      print(f"📊 Result: {total/(1024*1024):.1f}MB in {duration:.2f}s ({mbps:.2f} Mbps)")
+                      start_time = time.time()
+                      total_bytes = 0
+                      while total_bytes < (SIZE_MB * 1024 * 1024):
+                          data = conn.recv(BUFFER_SIZE)
+                          if not data: break
+                          total_bytes += len(data)
+                      
+                      duration = time.time() - start_time
+                      mbps = (total_bytes * 8) / (duration * 1_000_000)
+                      print(f"📊 Result: {total_bytes/(1024*1024):.1f}MB in {duration:.2f}s ({mbps:.2f} Mbps)")
 
           def run_client(peer_ip):
-              print(f"🏎️ Rank 1: Blasting {SIZE_MB}MB to {peer_ip}...")
-              for i in range(15):
+              print(f"🏎️ Rank 1: Connecting to {peer_ip}...")
+              data_payload = b"\0" * BUFFER_SIZE
+              for i in range(20): # Robust retry for sync
                   try:
                       with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                           s.connect((peer_ip, PORT))
-                          start = time.time()
+                          print(f"🔥 Starting {SIZE_MB}MB blast...")
+                          start_time = time.time()
                           for _ in range(SIZE_MB):
-                              s.sendall(DATA)
-                          print(f"🔥 Blast complete in {time.time() - start:.2f}s")
+                              s.sendall(data_payload)
+                          print(f"✅ Blast complete in {time.time() - start_time:.2f}s")
                           return
-                  except Exception as e:
-                      print(f"Waiting for server... ({i+1}/15)")
-                      time.sleep(2)
+                  except Exception:
+                      print(f"Waiting for Rank 0... ({i+1}/20)")
+                      time.sleep(3)
 
           if __name__ == "__main__":
               rank = os.environ.get("RANK")
@@ -84,7 +87,7 @@ jobs:
                   run_client(peer)
           EOF
 
-          # 3. Execute
+          # 3. Run it
           export RANK=${{ matrix.rank }}
           export PEER_IP=$PEER_IP
           python3 bench.py
