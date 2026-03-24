@@ -1,8 +1,8 @@
-name: "Tailscale P2P Smoke Test"
+name: "Tailscale Direct P2P Test"
 on: workflow_dispatch
 
 jobs:
-  smoke-test:
+  p2p-test:
     runs-on: macos-15
     strategy:
       matrix:
@@ -10,41 +10,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 🛡️ Join Tailnet
+      - name: 🛡️ Join Tailnet (Forcing Direct)
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
+          # FORCE a specific port and disable rotation to help the hole-punch
+          args: --port=41641 --snat-subnet-routes=false --accept-routes=false
 
-      - name: 🔍 P2P Discovery (Non-Self Filter)
+      - name: 🏎️ Bandwidth & P2P Verification
         run: |
           MY_IP=$(tailscale ip -4)
-          echo "My local Tailscale IP: $MY_IP"
+          # Get the other runner's IP
+          PEER_IP=$(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] != \"$MY_IP\") | .TailscaleIPs[0]" | head -n 1)
           
-          echo "Waiting for peer to appear..."
-          # 24 attempts * 5s = 120 seconds total wait time
-          for i in {1..24}; do
-            # Find any IP in the tailnet that is NOT mine
-            PEER_IP=$(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] != \"$MY_IP\") | .TailscaleIPs[0]" | head -n 1)
-            
-            if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then
-              echo "✅ PEER DISCOVERED: $PEER_IP"
-              echo "🛰️ Attempting P2P Hole-Punch..."
-              
-              # tailscale ping is better than system ping because it triggers 
-              # the direct path discovery process.
-              tailscale ping --c 5 $PEER_IP
-              
-              echo "--- Connection Details ---"
-              tailscale status
-              exit 0
-            fi
-            
-            echo "Attempt $i: Peer not visible yet. Retrying..."
-            sleep 5
-          done
+          echo "My IP: $MY_IP | Peer IP: $PEER_IP"
+          
+          # Force a discovery ping
+          echo "Punching hole to $PEER_IP..."
+          tailscale ping --c 10 --tsmp $PEER_IP
+          
+          # Check if the connection flipped to 'direct'
+          CONN_TYPE=$(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] == \"$PEER_IP\") | .CurAddr")
+          
+          if [[ "$CONN_TYPE" == *"relay"* ]]; then
+            echo "❌ STILL RELAYED ($CONN_TYPE). Bandwidth will be capped at ~10Mbps."
+            # We fail the smoke test here because 7B training will crawl
+            exit 1 
+          else
+            echo "✅ DIRECT CONNECTION ESTABLISHED ($CONN_TYPE)!"
+          fi
 
-          echo "❌ TIMEOUT: Peer never joined the tailnet."
-          tailscale status
-          exit 1
+      - name: 📊 Performance Baseline
+        if: success()
+        run: |
+          # Use netcat (nc) to see if we can push at least 50MB/s
+          if [ "${{ matrix.rank }}" == "0" ]; then
+            timeout 20s nc -l 9999 > /dev/null
+          else
+            sleep 5
+            dd if=/dev/zero bs=1m count=100 | nc -v $(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] != \"$(tailscale ip -4)\") | .TailscaleIPs[0]") 9999
+          fi
