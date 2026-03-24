@@ -16,10 +16,8 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
-          # We add --reset here to clear the 'multiple flag' conflict
           args: --reset
         env:
-          # Use the environment variable to set the port for the daemon
           TS_EXTRA_ARGS: "--port=41641"
 
       - name: 🏎️ NAT Hole-Punch & Discovery
@@ -27,29 +25,38 @@ jobs:
           MY_IP=$(tailscale ip -4)
           echo "My IP: $MY_IP"
           
-          echo "Waiting for peer..."
-          for i in {1..20}; do
-            PEER_IP=$(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] != \"$MY_IP\") | .TailscaleIPs[0]" | head -n 1)
+          echo "Waiting for peer to join the tailnet..."
+          PEER_IP=""
+          
+          # Wait up to 2 minutes (24 attempts * 5s)
+          for i in {1..24}; do
+            # Safe JQ: Check if .Peer exists before iterating
+            PEER_IP=$(tailscale status --json | jq -r 'if .Peer != null then .Peer[] | select(.TailscaleIPs[0] != "'$MY_IP'") | .TailscaleIPs[0] else empty end' | head -n 1)
             
             if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then
-              echo "✅ Peer Found: $PEER_IP. Starting UDP Blast..."
-              
-              # Standard ping to wake up the OS firewall
-              ping -c 5 $PEER_IP
-              
-              # Blast UDP to the WireGuard port to force a NAT mapping
-              for j in {1..20}; do
-                nc -u -z -w 1 $PEER_IP 41641
-                sleep 0.1
-              done
-
-              echo "🛰️ Finalizing Path..."
-              tailscale ping --c 5 --tsmp $PEER_IP
-              
-              echo "--- Connection Type ---"
-              tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] == \"$PEER_IP\") | .CurAddr"
-              exit 0
+              echo "✅ Peer Found: $PEER_IP"
+              break
             fi
+            
+            echo "Attempt $i: Peer not visible yet. Retrying in 5s..."
             sleep 5
           done
-          exit 1
+
+          if [ -z "$PEER_IP" ]; then
+            echo "❌ Timeout: Peer never joined."
+            tailscale status
+            exit 1
+          fi
+
+          echo "🛰️ Starting UDP Hole-Punch to $PEER_IP..."
+          # Blast UDP packets to help the firewall map the port 41641
+          for j in {1..20}; do
+            nc -u -z -w 1 $PEER_IP 41641
+            sleep 0.1
+          done
+
+          echo "--- Connection Type (Look for 'direct') ---"
+          tailscale ping --c 5 --tsmp $PEER_IP
+          
+          # Final check to see if we moved off DERP relay
+          tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] == \"$PEER_IP\") | .CurAddr"
