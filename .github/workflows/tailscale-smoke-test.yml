@@ -1,4 +1,4 @@
-name: "Tailscale Zero-Install Benchmark"
+name: "Tailscale Research Benchmark (Robust)"
 on: workflow_dispatch
 
 jobs:
@@ -20,29 +20,45 @@ jobs:
         env:
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🏎️ NC Saturation Test (macOS Native)
+      - name: 🏎️ Robust P2P Saturation Test
         run: |
           MY_IP=$(tailscale ip -4)
           
+          # 1. Discovery with Null-Safety
           echo "Scanning for peer..."
-          for i in {1..20}; do
+          for i in {1..30}; do
             PEER_IP=$(tailscale status --json | jq -r 'if .Peer != null then .Peer[] | select(.TailscaleIPs[0] != "'$MY_IP'") | .TailscaleIPs[0] else empty end' | head -n 1)
             if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then break; fi
+            echo "Waiting for peer ($i/30)..."
             sleep 5
           done
 
+          # 2. Edge Case: Rank-Based Logic
           if [ "${{ matrix.rank }}" == "0" ]; then
-            echo "🚀 Rank 0: Listening on port 9999..."
-            # Start listener in background, dump to /dev/null
-            nc -l 9999 > /dev/null &
-            NC_PID=$!
-            sleep 30
-            kill $NC_PID || true
+            echo "🚀 Rank 0: Starting Persistent Listener..."
+            # Keep-alive loop to handle 'Broken Pipes'
+            (
+              while true; do 
+                nc -l 9999 > /dev/null
+              done
+            ) &
+            LPID=$!
+            # Ensure cleanup on exit
+            trap "kill $LPID" EXIT
+            sleep 60
           else
-            echo "🏎️ Rank 1: Blasting 500MB of data to $PEER_IP..."
-            sleep 10 # Let Rank 0 set up the listener
+            echo "🏎️ Rank 1: Warming up connection to $PEER_IP..."
+            sleep 15
             
-            # Use 'dd' to pump data. 
-            # Output will show transfer rate in MB/s automatically on macOS!
+            # 3. Edge Case: Handshake before Saturation
+            # Try to connect 5 times to "warm" the NAT/TCP state
+            for k in {1..5}; do
+              nc -z -v -w 2 $PEER_IP 9999 && break
+              echo "Warmup $k failed, retrying..."
+              sleep 2
+            done
+
+            # 4. The Main Event: 500MB Data Blast
+            echo "🔥 Sourcing data blast..."
             dd if=/dev/zero bs=1m count=500 | nc -v -n $PEER_IP 9999
           fi
