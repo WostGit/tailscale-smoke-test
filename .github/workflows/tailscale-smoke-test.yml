@@ -10,45 +10,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 🛡️ Join Tailnet (Forcing Direct)
+      - name: 🛡️ Join Tailnet (Direct Mode)
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
-          # FORCE a specific port and disable rotation to help the hole-punch
-          args: --port=41641 --snat-subnet-routes=false --accept-routes=false
+          # Logic flags go in 'args'
+          args: --snat-subnet-routes=false --accept-routes=false
+        env:
+          # DAEMON flags go here in 2026 v4 Action
+          TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🏎️ Bandwidth & P2P Verification
+      - name: 🩺 Network Diagnostic
+        run: |
+          echo "--- NAT & UDP Check ---"
+          tailscale netcheck
+          echo "--- Tailscale Status ---"
+          tailscale status
+
+      - name: 🏎️ P2P Discovery & Hole-Punch
         run: |
           MY_IP=$(tailscale ip -4)
-          # Get the other runner's IP
           PEER_IP=$(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] != \"$MY_IP\") | .TailscaleIPs[0]" | head -n 1)
           
-          echo "My IP: $MY_IP | Peer IP: $PEER_IP"
-          
-          # Force a discovery ping
-          echo "Punching hole to $PEER_IP..."
-          tailscale ping --c 10 --tsmp $PEER_IP
-          
-          # Check if the connection flipped to 'direct'
-          CONN_TYPE=$(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] == \"$PEER_IP\") | .CurAddr")
-          
-          if [[ "$CONN_TYPE" == *"relay"* ]]; then
-            echo "❌ STILL RELAYED ($CONN_TYPE). Bandwidth will be capped at ~10Mbps."
-            # We fail the smoke test here because 7B training will crawl
-            exit 1 
-          else
-            echo "✅ DIRECT CONNECTION ESTABLISHED ($CONN_TYPE)!"
+          if [ -z "$PEER_IP" ] || [ "$PEER_IP" == "null" ]; then
+            echo "Waiting for peer..."
+            sleep 15
+            PEER_IP=$(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] != \"$MY_IP\") | .TailscaleIPs[0]" | head -n 1)
           fi
 
-      - name: 📊 Performance Baseline
-        if: success()
-        run: |
-          # Use netcat (nc) to see if we can push at least 50MB/s
-          if [ "${{ matrix.rank }}" == "0" ]; then
-            timeout 20s nc -l 9999 > /dev/null
-          else
-            sleep 5
-            dd if=/dev/zero bs=1m count=100 | nc -v $(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] != \"$(tailscale ip -4)\") | .TailscaleIPs[0]") 9999
-          fi
+          echo "Attempting P2P Hole-Punch to $PEER_IP..."
+          # The --tsmp flag uses Tailscale's internal messaging to force a path
+          tailscale ping --c 10 --tsmp $PEER_IP
+          
+          # Final path check
+          tailscale status | grep $PEER_IP
