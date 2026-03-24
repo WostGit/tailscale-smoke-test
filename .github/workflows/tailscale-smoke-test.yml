@@ -16,78 +16,67 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
-          args: --reset
+          args: --reset --accept-routes=false --accept-dns=false
         env:
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🏎️ Python P2P Stress Test
+      - name: 🔍 Debug & Discover
         run: |
+          # Give it a moment to settle
+          sleep 10
           MY_IP=$(tailscale ip -4)
+          echo "My Tailscale IP: $MY_IP"
           
-          # 1. Discovery Loop (Increased to 30 attempts for slow VM boots)
+          # DUMP STATUS: This helps us see if the other peer is 'offline' or 'missing'
+          echo "--- Current Tailscale Status ---"
+          tailscale status
+          
           echo "Scanning for peer..."
-          for i in {1..30}; do
-            PEER_IP=$(tailscale status --json | jq -r 'if .Peer != null then .Peer[] | select(.TailscaleIPs[0] != "'$MY_IP'") | .TailscaleIPs[0] else empty end' | head -n 1)
-            if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then break; fi
-            echo "Waiting for peer ($i/30)..."
+          PEER_IP=""
+          for i in {1..20}; do
+            # We filter for ANY other 100.x.x.x address that isn't ours
+            PEER_IP=$(tailscale status --json | jq -r --arg me "$MY_IP" '.Peer | values[] | select(.TailscaleIPs[0] != $me) | .TailscaleIPs[0]' | head -n 1)
+            
+            if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then
+              echo "✅ Peer Found: $PEER_IP"
+              break
+            fi
+            echo "Waiting for peer ($i/20)..."
             sleep 5
           done
 
-          # 2. Write the Python Benchmark Script
-          cat <<'EOF' > bench.py
+          if [ -z "$PEER_IP" ]; then
+            echo "❌ ERROR: No peers found. Is the other runner up?"
+            exit 1
+          fi
+
+          # (Rest of the Python bench.py generation goes here...)
+          # Export for the Python script
+          echo "PEER_IP=$PEER_IP" >> $GITHUB_ENV
+          echo "RANK=${{ matrix.rank }}" >> $GITHUB_ENV
+
+      - name: 🐍 Execute Python Bench
+        run: |
+          # Use the environment variables from the previous step
+          python3 -c "
           import socket, time, os
-
           PORT = 9999
-          SIZE_MB = 500
-          BUFFER_SIZE = 1024 * 1024 # 1MB
-
+          SIZE_MB = 200
           def run_server():
-              print(f"🚀 Rank 0: Sink started on {PORT}...")
-              with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                  s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                  s.bind(('0.0.0.0', PORT))
-                  s.listen(1)
-                  conn, addr = s.accept()
-                  with conn:
-                      print(f"✅ Connected by {addr}")
-                      start_time = time.time()
-                      total_bytes = 0
-                      while total_bytes < (SIZE_MB * 1024 * 1024):
-                          data = conn.recv(BUFFER_SIZE)
-                          if not data: break
-                          total_bytes += len(data)
-                      
-                      duration = time.time() - start_time
-                      mbps = (total_bytes * 8) / (duration * 1_000_000)
-                      print(f"📊 Result: {total_bytes/(1024*1024):.1f}MB in {duration:.2f}s ({mbps:.2f} Mbps)")
-
-          def run_client(peer_ip):
-              print(f"🏎️ Rank 1: Connecting to {peer_ip}...")
-              data_payload = b"\0" * BUFFER_SIZE
-              for i in range(20): # Robust retry for sync
-                  try:
-                      with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                          s.connect((peer_ip, PORT))
-                          print(f"🔥 Starting {SIZE_MB}MB blast...")
-                          start_time = time.time()
-                          for _ in range(SIZE_MB):
-                              s.sendall(data_payload)
-                          print(f"✅ Blast complete in {time.time() - start_time:.2f}s")
-                          return
-                  except Exception:
-                      print(f"Waiting for Rank 0... ({i+1}/20)")
-                      time.sleep(3)
-
-          if __name__ == "__main__":
-              rank = os.environ.get("RANK")
-              peer = os.environ.get("PEER_IP")
-              if rank == "0":
-                  run_server()
-              else:
-                  run_client(peer)
-          EOF
-
-          # 3. Run it
-          export RANK=${{ matrix.rank }}
-          export PEER_IP=$PEER_IP
-          python3 bench.py
+              s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+              s.bind(('0.0.0.0', PORT))
+              s.listen(1)
+              print('Waiting for connection...')
+              conn, addr = s.accept()
+              start = time.time()
+              while conn.recv(1024*1024): pass
+              print(f'Done in {time.time()-start:.2f}s')
+          def run_client(ip):
+              time.sleep(5)
+              s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              s.connect((ip, PORT))
+              for _ in range(SIZE_MB): s.sendall(b'0'*1024*1024)
+          if os.environ['RANK'] == '0': run_server()
+          else: run_client(os.environ['PEER_IP'])
+          "
