@@ -17,29 +17,34 @@ jobs:
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
 
-      - name: 🔍 Discovery & Connectivity Test
+      - name: 🔍 P2P Discovery (Non-Self Filter)
         run: |
-          echo "My Tailscale IP is: $(tailscale ip -4)"
-          echo "--- Tailscale Status ---"
-          tailscale status
+          MY_IP=$(tailscale ip -4)
+          echo "My local Tailscale IP: $MY_IP"
           
-          # Try to find the OTHER runner
-          # If I am Rank 0, I look for Rank 1. If I am Rank 1, I look for Rank 0.
-          TARGET_RANK=$((1 - ${{ matrix.rank }}))
-          echo "Looking for Peer Rank: $TARGET_RANK"
-          
-          # Wait up to 60 seconds for the peer to appear in the netmap
-          for i in {1..12}; do
-            PEER_IP=$(tailscale status --json | jq -r ".Peer[] | select(.HostName | contains(\"-$TARGET_RANK\")) | .TailscaleIPs[0]" | head -n 1)
+          echo "Waiting for peer to appear..."
+          # 24 attempts * 5s = 120 seconds total wait time
+          for i in {1..24}; do
+            # Find any IP in the tailnet that is NOT mine
+            PEER_IP=$(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] != \"$MY_IP\") | .TailscaleIPs[0]" | head -n 1)
+            
             if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then
-              echo "✅ Found Peer at $PEER_IP"
-              echo "🛰️ Pinging Peer..."
-              tailscale ping --c 3 $PEER_IP
+              echo "✅ PEER DISCOVERED: $PEER_IP"
+              echo "🛰️ Attempting P2P Hole-Punch..."
+              
+              # tailscale ping is better than system ping because it triggers 
+              # the direct path discovery process.
+              tailscale ping --c 5 $PEER_IP
+              
+              echo "--- Connection Details ---"
+              tailscale status
               exit 0
             fi
-            echo "Waiting for peer... (Attempt $i)"
+            
+            echo "Attempt $i: Peer not visible yet. Retrying..."
             sleep 5
           done
-          
-          echo "❌ Peer not found in time."
+
+          echo "❌ TIMEOUT: Peer never joined the tailnet."
+          tailscale status
           exit 1
