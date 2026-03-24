@@ -10,20 +10,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 🛡️ Join Tailnet (Symmetric NAT Fix)
+      - name: 🛡️ Join Tailnet
         uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
-          args: --accept-routes=false --accept-dns=false
+          # We add --reset here to clear the 'multiple flag' conflict
+          args: --reset
         env:
-          # TS_EXTRA_ARGS is passed to the daemon (tailscaled) in v4
+          # Use the environment variable to set the port for the daemon
           TS_EXTRA_ARGS: "--port=41641"
 
       - name: 🏎️ NAT Hole-Punch & Discovery
         run: |
           MY_IP=$(tailscale ip -4)
+          echo "My IP: $MY_IP"
           
           echo "Waiting for peer..."
           for i in {1..20}; do
@@ -32,17 +34,19 @@ jobs:
             if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then
               echo "✅ Peer Found: $PEER_IP. Starting UDP Blast..."
               
-              # Blast UDP packets to force the Symmetric NAT to create a mapping
-              for j in {1..30}; do
+              # Standard ping to wake up the OS firewall
+              ping -c 5 $PEER_IP
+              
+              # Blast UDP to the WireGuard port to force a NAT mapping
+              for j in {1..20}; do
                 nc -u -z -w 1 $PEER_IP 41641
                 sleep 0.1
               done
 
-              echo "🛰️ Finalizing Direct Path..."
+              echo "🛰️ Finalizing Path..."
               tailscale ping --c 5 --tsmp $PEER_IP
               
               echo "--- Connection Type ---"
-              # If this still says relay, the cloud firewall is strictly blocking UDP
               tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] == \"$PEER_IP\") | .CurAddr"
               exit 0
             fi
