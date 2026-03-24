@@ -16,36 +16,25 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
-          # Only use flags that appeared in your 'tailscale up --help' log
-          args: --accept-routes=false --accept-dns=false
+          # REMOVED ALL CUSTOM ARGS TO AVOID FLAG ERRORS
         env:
-          # This passes directly to the background daemon (tailscaled)
+          # We still keep the port for the background daemon
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🏎️ P2P Discovery & Hole-Punch
+      - name: 🏎️ P2P Discovery
         run: |
-          MY_IP=$(tailscale ip -4)
-          echo "My IP: $MY_IP"
-          
-          # Wait for the other runner to appear
-          echo "Scanning for peer..."
-          for i in {1..20}; do
+          # Wait up to 2 minutes for both to be online
+          for i in {1..24}; do
+            MY_IP=$(tailscale ip -4)
             PEER_IP=$(tailscale status --json | jq -r ".Peer[] | select(.TailscaleIPs[0] != \"$MY_IP\") | .TailscaleIPs[0]" | head -n 1)
             
             if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then
-              echo "✅ Found Peer: $PEER_IP"
-              echo "🛰️ Forcing P2P Hole-Punch..."
-              # Using the standard ping first, then tailscale ping
-              ping -c 3 $PEER_IP
+              echo "✅ Peer Found: $PEER_IP"
               tailscale ping --c 5 $PEER_IP
-              
-              echo "--- Connection Path ---"
               tailscale status
               exit 0
             fi
+            echo "Attempt $i: Waiting for peer..."
             sleep 5
           done
-          
-          echo "❌ Peer discovery timed out."
-          tailscale status
           exit 1
