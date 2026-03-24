@@ -20,26 +20,29 @@ jobs:
         env:
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🏎️ NC Saturation Test
+      - name: 🏎️ NC Saturation Test (macOS Native)
         run: |
           MY_IP=$(tailscale ip -4)
           
           echo "Scanning for peer..."
           for i in {1..20}; do
             PEER_IP=$(tailscale status --json | jq -r 'if .Peer != null then .Peer[] | select(.TailscaleIPs[0] != "'$MY_IP'") | .TailscaleIPs[0] else empty end' | head -n 1)
-            if [ ! -z "$PEER_IP" ]; then break; fi
+            if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then break; fi
             sleep 5
           done
 
           if [ "${{ matrix.rank }}" == "0" ]; then
             echo "🚀 Rank 0: Listening on port 9999..."
-            # Listen on port 9999 and dump to null. 
-            # We use 'timeout' to stop the job once the test is over.
-            timeout 25s nc -l 9999 > /dev/null || true
+            # Start listener in background, dump to /dev/null
+            nc -l 9999 > /dev/null &
+            NC_PID=$!
+            sleep 30
+            kill $NC_PID || true
           else
             echo "🏎️ Rank 1: Blasting 500MB of data to $PEER_IP..."
-            sleep 10
-            # Generate 500MB of zeros and send via netcat
-            # We use 'time' to measure how long it takes to calculate speed
-            time (dd if=/dev/zero bs=1m count=500 | nc -v -n $PEER_IP 9999)
+            sleep 10 # Let Rank 0 set up the listener
+            
+            # Use 'dd' to pump data. 
+            # Output will show transfer rate in MB/s automatically on macOS!
+            dd if=/dev/zero bs=1m count=500 | nc -v -n $PEER_IP 9999
           fi
