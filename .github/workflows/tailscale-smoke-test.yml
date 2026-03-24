@@ -1,0 +1,45 @@
+name: "Tailscale P2P Smoke Test"
+on: workflow_dispatch
+
+jobs:
+  smoke-test:
+    runs-on: macos-15
+    strategy:
+      matrix:
+        rank: [0, 1]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🛡️ Join Tailnet
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-runner
+
+      - name: 🔍 Discovery & Connectivity Test
+        run: |
+          echo "My Tailscale IP is: $(tailscale ip -4)"
+          echo "--- Tailscale Status ---"
+          tailscale status
+          
+          # Try to find the OTHER runner
+          # If I am Rank 0, I look for Rank 1. If I am Rank 1, I look for Rank 0.
+          TARGET_RANK=$((1 - ${{ matrix.rank }}))
+          echo "Looking for Peer Rank: $TARGET_RANK"
+          
+          # Wait up to 60 seconds for the peer to appear in the netmap
+          for i in {1..12}; do
+            PEER_IP=$(tailscale status --json | jq -r ".Peer[] | select(.HostName | contains(\"-$TARGET_RANK\")) | .TailscaleIPs[0]" | head -n 1)
+            if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then
+              echo "✅ Found Peer at $PEER_IP"
+              echo "🛰️ Pinging Peer..."
+              tailscale ping --c 3 $PEER_IP
+              exit 0
+            fi
+            echo "Waiting for peer... (Attempt $i)"
+            sleep 5
+          done
+          
+          echo "❌ Peer not found in time."
+          exit 1
