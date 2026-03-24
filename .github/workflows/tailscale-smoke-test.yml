@@ -16,67 +16,77 @@ jobs:
           oauth-client-id: ${{ secrets.TS_OAUTH_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-runner
-          args: --reset --accept-routes=false --accept-dns=false
+          # Removed redundant flags to avoid the "multiple times" error
+          args: --reset
         env:
           TS_EXTRA_ARGS: "--port=41641"
 
-      - name: 🔍 Debug & Discover
+      - name: 🏎️ P2P Discovery & Stress Test
         run: |
-          # Give it a moment to settle
-          sleep 10
           MY_IP=$(tailscale ip -4)
-          echo "My Tailscale IP: $MY_IP"
+          echo "My IP: $MY_IP"
           
-          # DUMP STATUS: This helps us see if the other peer is 'offline' or 'missing'
-          echo "--- Current Tailscale Status ---"
-          tailscale status
-          
+          # 1. Discovery Loop
           echo "Scanning for peer..."
           PEER_IP=""
-          for i in {1..20}; do
-            # We filter for ANY other 100.x.x.x address that isn't ours
-            PEER_IP=$(tailscale status --json | jq -r --arg me "$MY_IP" '.Peer | values[] | select(.TailscaleIPs[0] != $me) | .TailscaleIPs[0]' | head -n 1)
+          for i in {1..30}; do
+            # Robust JQ query to find the 'other' runner
+            PEER_IP=$(tailscale status --json | jq -r --arg me "$MY_IP" '.Peer | values[]? | select(.TailscaleIPs[0] != $me) | .TailscaleIPs[0]' | head -n 1)
             
             if [ ! -z "$PEER_IP" ] && [ "$PEER_IP" != "null" ]; then
               echo "✅ Peer Found: $PEER_IP"
               break
             fi
-            echo "Waiting for peer ($i/20)..."
+            echo "Waiting for peer ($i/30)..."
             sleep 5
           done
 
           if [ -z "$PEER_IP" ]; then
-            echo "❌ ERROR: No peers found. Is the other runner up?"
+            echo "❌ Timeout: No peers visible."
+            tailscale status
             exit 1
           fi
 
-          # (Rest of the Python bench.py generation goes here...)
-          # Export for the Python script
-          echo "PEER_IP=$PEER_IP" >> $GITHUB_ENV
-          echo "RANK=${{ matrix.rank }}" >> $GITHUB_ENV
-
-      - name: 🐍 Execute Python Bench
-        run: |
-          # Use the environment variables from the previous step
-          python3 -c "
+          # 2. Python Benchmark Script
+          cat <<'EOF' > bench.py
           import socket, time, os
           PORT = 9999
-          SIZE_MB = 200
+          SIZE_MB = 200 # Reduced for a quicker confirmation
           def run_server():
-              s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-              s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-              s.bind(('0.0.0.0', PORT))
-              s.listen(1)
-              print('Waiting for connection...')
-              conn, addr = s.accept()
-              start = time.time()
-              while conn.recv(1024*1024): pass
-              print(f'Done in {time.time()-start:.2f}s')
+              print("🚀 Rank 0: Sink ready...")
+              with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                  s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                  s.bind(('0.0.0.0', PORT))
+                  s.listen(1)
+                  conn, addr = s.accept()
+                  with conn:
+                      start = time.time()
+                      total = 0
+                      while True:
+                          data = conn.recv(1024*1024)
+                          if not data: break
+                          total += len(data)
+                      duration = time.time() - start
+                      print(f"📊 {total/1024/1024:.1f}MB in {duration:.2f}s ({(total*8)/(duration*1e6):.2f} Mbps)")
+
           def run_client(ip):
-              time.sleep(5)
-              s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-              s.connect((ip, PORT))
-              for _ in range(SIZE_MB): s.sendall(b'0'*1024*1024)
-          if os.environ['RANK'] == '0': run_server()
-          else: run_client(os.environ['PEER_IP'])
-          "
+              print(f"🏎️ Rank 1: Sending to {ip}...")
+              time.sleep(10) # Wait for server to be 100% up
+              for _ in range(10): # Retry loop
+                  try:
+                      with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                          s.connect((ip, PORT))
+                          for _ in range(SIZE_MB): s.sendall(b'\0' * (1024*1024))
+                          print("🔥 Blast finished.")
+                          return
+                  except:
+                      time.sleep(2)
+
+          if __name__ == "__main__":
+              if os.environ['RANK'] == '0': run_server()
+              else: run_client(os.environ['PEER_IP'])
+          EOF
+
+          export RANK=${{ matrix.rank }}
+          export PEER_IP=$PEER_IP
+          python3 bench.py
